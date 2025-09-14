@@ -1,0 +1,5 @@
+{
+  "name": "Suno Prompt Architect",
+  "description": "An AI-powered application that architects detailed, high-quality prompts for Suno AI. Features multiple modes including a 'Magic Wand' enhancer, a Genre Blender, an Instrument Palette, and full song creation with lyrical concept generation.",
+  "requestFramePermissions": []
+}
