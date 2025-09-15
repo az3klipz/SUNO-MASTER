@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { GENRE_CATEGORIES, GenreCategory, MOODS, VOCAL_STYLES, ATMOSPHERES, SONG_STRUCTURES, INSTRUMENTS } from './constants';
-import { generateSunoPrompt, getArtistInspirations, enhanceSimplePrompt, GeneratePromptOptions } from './services/geminiService';
+import { generateSunoPrompt, getArtistInspirations, enhanceSimplePrompt, analyzeTrack, GeneratePromptOptions, AnalysisResult, generateVideoTreatment } from './services/geminiService';
 import GenreSelector from './components/GenreSelector';
 import MoodSelector from './components/MoodSelector';
 import PromptDisplay from './components/PromptDisplay';
@@ -16,8 +16,10 @@ import ArtistInspiration from './components/ArtistInspiration';
 import MagicWandMode from './components/MagicWandMode';
 import GenreBlender from './components/GenreBlender';
 import InstrumentPalette from './components/InstrumentPalette';
+import AnalyzeTrackMode from './components/AnalyzeTrackMode';
+import MusicVideoMode from './components/MusicVideoMode';
 
-type PromptMode = 'Instrumental' | 'Full Song' | 'Magic Wand';
+type PromptMode = 'Instrumental' | 'Full Song' | 'Magic Wand' | 'Analyze Track' | 'Video Treatment';
 type LockableField = 'genre' | 'mood' | 'vocal' | 'atmosphere' | 'influence' | 'instruments';
 
 interface HistoryItem {
@@ -37,6 +39,9 @@ interface HistoryItem {
   lyrics?: string;
   structure?: string;
   lyricalConcept?: string;
+  // Analysis
+  bpm?: number | null;
+  key?: string | null;
 }
 
 interface ShareableState {
@@ -51,6 +56,8 @@ interface ShareableState {
     l?: string;
     s?: string;
     lc?: string;
+    bpm?: number | null;
+    k?: string | null;
 }
 
 const App: React.FC = () => {
@@ -71,6 +78,12 @@ const App: React.FC = () => {
   const [lyricalConcept, setLyricalConcept] = useState('');
   const [songStructure, setSongStructure] = useState<string>(SONG_STRUCTURES[0].structure);
   
+  // Analysis State
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [analyzedBpm, setAnalyzedBpm] = useState<number | null>(null);
+  const [analyzedKey, setAnalyzedKey] = useState<string | null>(null);
+
   const [lockedFields, setLockedFields] = useState<Set<LockableField>>(new Set());
   const [generatedPrompt, setGeneratedPrompt] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -78,6 +91,37 @@ const App: React.FC = () => {
   const [inspirationalArtists, setInspirationalArtists] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [promptHistory, setPromptHistory] = useState<HistoryItem[]>([]);
+
+  // Video Treatment State
+  const [videoTreatment, setVideoTreatment] = useState<string | null>(null);
+  const [isGeneratingTreatment, setIsGeneratingTreatment] = useState<boolean>(false);
+  
+  const resetSelections = useCallback(() => {
+    setSelectedMainGenre(null);
+    setSelectedSubgenre(null);
+    setSelectedMood(null);
+    setSelectedVocal(null);
+    setSelectedAtmosphere(null);
+    setSelectedInfluenceGenre(null);
+    setSelectedInstruments([]);
+    setAnalyzedBpm(null);
+    setAnalyzedKey(null);
+    setInspirationalArtists([]);
+    setLyrics('');
+    setLyricalConcept('');
+  }, []);
+
+  const handleSetPromptMode = useCallback((mode: PromptMode | null) => {
+    setPromptMode(mode);
+    setGeneratedPrompt('');
+    setVideoTreatment(null);
+    setError(null);
+    setAnalysisResult(null);
+    // Reset selections when returning to menu or entering non-architect mode
+    if (mode === null || mode === 'Magic Wand' || mode === 'Analyze Track' || mode === 'Video Treatment') {
+        resetSelections();
+    }
+  }, [resetSelections]);
 
   const loadStateFromUrl = () => {
     try {
@@ -99,8 +143,9 @@ const App: React.FC = () => {
                 setLyrics(decodedState.l || '');
                 setSongStructure(decodedState.s || SONG_STRUCTURES[0].structure);
                 setLyricalConcept(decodedState.lc || '');
+                setAnalyzedBpm(decodedState.bpm || null);
+                setAnalyzedKey(decodedState.k || null);
                 setLockedFields(new Set());
-                // Clear URL params after loading
                 window.history.replaceState({}, document.title, window.location.pathname);
             }
         }
@@ -154,9 +199,7 @@ const App: React.FC = () => {
   };
 
   const handleGeneratePrompt = useCallback(async () => {
-    // FIX: Add check for 'Magic Wand' to satisfy TypeScript type for GeneratePromptOptions.
-    // This function should not be called when in 'Magic Wand' mode anyway.
-    if (!selectedSubgenre || !promptMode || promptMode === 'Magic Wand') {
+    if (!selectedSubgenre || !promptMode || promptMode === 'Magic Wand' || promptMode === 'Analyze Track' || promptMode === 'Video Treatment') {
       setError('Please complete all selections first.');
       return;
     }
@@ -180,7 +223,9 @@ const App: React.FC = () => {
       atmosphere: selectedAtmosphere,
       lyrics: lyrics,
       structure: songStructure,
-      lyricalConcept: lyricalConcept
+      lyricalConcept: lyricalConcept,
+      bpm: analyzedBpm,
+      key: analyzedKey
     }
 
     try {
@@ -198,7 +243,9 @@ const App: React.FC = () => {
           atmosphere: selectedAtmosphere,
           lyrics,
           structure: songStructure,
-          lyricalConcept
+          lyricalConcept,
+          bpm: analyzedBpm,
+          key: analyzedKey
       });
     } catch (err) {
       setError('Failed to generate prompt. Please try again.');
@@ -206,7 +253,7 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [promptMode, selectedSubgenre, selectedMood, includeSolfeggio, selectedInfluenceGenre, selectedInstruments, selectedVocal, selectedAtmosphere, lyrics, songStructure, lyricalConcept]);
+  }, [promptMode, selectedSubgenre, selectedMood, includeSolfeggio, selectedInfluenceGenre, selectedInstruments, selectedVocal, selectedAtmosphere, lyrics, songStructure, lyricalConcept, analyzedBpm, analyzedKey]);
   
   const handleEnhancePrompt = useCallback(async (simplePrompt: string) => {
     if (!simplePrompt) {
@@ -220,7 +267,6 @@ const App: React.FC = () => {
     try {
         const prompt = await enhanceSimplePrompt(simplePrompt);
         setGeneratedPrompt(prompt);
-        // Not adding to history for now as it doesn't have the same settings structure
     } catch (err) {
         setError('Failed to enhance prompt. Please try again.');
         console.error(err);
@@ -229,15 +275,72 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const resetSelections = () => {
-    setSelectedMainGenre(null);
-    setSelectedSubgenre(null);
-    setSelectedMood(null);
-    setSelectedVocal(null);
-    setSelectedAtmosphere(null);
-    setSelectedInfluenceGenre(null);
-    setSelectedInstruments([]);
-  };
+  const handleAnalyzeTrack = useCallback(async (source: string | File) => {
+    if (!source) {
+        setError("Please provide a track URL or upload a file.");
+        return;
+    }
+    setIsAnalyzing(true);
+    setError(null);
+    setAnalysisResult(null);
+
+    try {
+        const result = await analyzeTrack(source);
+        setAnalysisResult(result);
+    } catch (err) {
+        setError('Failed to analyze track. Please check the source or try again.');
+        console.error(err);
+    } finally {
+        setIsAnalyzing(false);
+    }
+  }, []);
+
+  const handleGenerateVideoTreatment = useCallback(async (songPrompt: string) => {
+    if (!songPrompt) {
+        setError("Please paste a song prompt to generate a treatment.");
+        return;
+    }
+    setIsGeneratingTreatment(true);
+    setError(null);
+    setVideoTreatment(null);
+
+    try {
+        const treatment = await generateVideoTreatment(songPrompt);
+        setVideoTreatment(treatment);
+    } catch (err) {
+        setError('Failed to generate video treatment. Please try again.');
+        console.error(err);
+    } finally {
+        setIsGeneratingTreatment(false);
+    }
+  }, []);
+
+  const handleUseAnalysis = useCallback((result: AnalysisResult, mode: 'Instrumental' | 'Full Song') => {
+    const category = GENRE_CATEGORIES.find(cat => cat.subgenres.some(sg => sg.toLowerCase() === result.subgenre.toLowerCase()));
+    const matchingSubgenre = category?.subgenres.find(sg => sg.toLowerCase() === result.subgenre.toLowerCase());
+
+    if (category && matchingSubgenre) {
+        setPromptMode(mode); // Direct set, not handleSetPromptMode
+        setSelectedMainGenre(category);
+        setSelectedSubgenre(matchingSubgenre);
+        
+        const matchingMood = MOODS.find(m => m.toLowerCase() === result.mood.toLowerCase());
+        setSelectedMood(matchingMood || null);
+
+        const matchingInstruments = result.instruments
+          .map(instrument => INSTRUMENTS.find(i => i.toLowerCase() === instrument.toLowerCase()))
+          .filter((i): i is string => !!i);
+        
+        setSelectedInstruments(matchingInstruments.slice(0, 3));
+        setAnalyzedBpm(result.bpm);
+        setAnalyzedKey(result.key);
+
+        setAnalysisResult(null); // Clear analysis result after use
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+        setError(`Could not match the analyzed genre "${result.subgenre}" to our list. Please try another track.`);
+    }
+  }, []);
   
   const handleRandomize = () => {
     if (!lockedFields.has('genre')) {
@@ -245,6 +348,8 @@ const App: React.FC = () => {
       const randomSubgenre = randomCategory.subgenres[Math.floor(Math.random() * randomCategory.subgenres.length)];
       setSelectedMainGenre(randomCategory);
       setSelectedSubgenre(randomSubgenre);
+      setAnalyzedBpm(null);
+      setAnalyzedKey(null);
     }
     if (!lockedFields.has('mood')) {
         setSelectedMood(MOODS[Math.floor(Math.random() * MOODS.length)]);
@@ -307,7 +412,9 @@ const App: React.FC = () => {
         setLyrics(item.lyrics || '');
         setSongStructure(item.structure || SONG_STRUCTURES[0].structure);
         setLyricalConcept(item.lyricalConcept || '');
-        setLockedFields(new Set()); // Reset locks when loading history
+        setAnalyzedBpm(item.bpm || null);
+        setAnalyzedKey(item.key || null);
+        setLockedFields(new Set());
         window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
         setError("Could not find the genre category for the selected history item.");
@@ -327,7 +434,9 @@ const App: React.FC = () => {
         a: selectedAtmosphere,
         l: lyrics,
         s: songStructure,
-        lc: lyricalConcept
+        lc: lyricalConcept,
+        bpm: analyzedBpm,
+        k: analyzedKey,
     };
     const encodedState = btoa(JSON.stringify(state));
     const url = `${window.location.origin}${window.location.pathname}?s=${encodedState}`;
@@ -343,7 +452,7 @@ const App: React.FC = () => {
       }
   };
 
-  const renderConfigRow = (label: string, value: string | null | string[], field: LockableField) => {
+  const renderConfigRow = (label: string, value: string | null | string[] | number, field: LockableField) => {
     if (!value || (Array.isArray(value) && value.length === 0)) return null;
     const displayValue = Array.isArray(value) ? value.join(', ') : value;
     return (
@@ -366,7 +475,7 @@ const App: React.FC = () => {
           <>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-2xl font-bold text-gray-100">Choose a Genre Category</h2>
-              <button onClick={() => setPromptMode(null)} className="px-3 py-1 text-sm font-medium text-indigo-300 bg-indigo-900/50 rounded-md hover:bg-indigo-900 transition-colors">
+              <button onClick={() => handleSetPromptMode(null)} className="px-3 py-1 text-sm font-medium text-indigo-300 bg-indigo-900/50 rounded-md hover:bg-indigo-900 transition-colors">
                 &larr; Back to Mode
               </button>
             </div>
@@ -394,7 +503,7 @@ const App: React.FC = () => {
                     &larr; Back to Categories
                   </button>
                 </div>
-                <GenreSelector genres={selectedMainGenre.subgenres} selectedGenre={null} onSelectGenre={setSelectedSubgenre} />
+                <GenreSelector genres={selectedMainGenre.subgenres} selectedGenre={null} onSelectGenre={(sg) => { setSelectedSubgenre(sg); setAnalyzedBpm(null); setAnalyzedKey(null); }} />
             </>
         );
     }
@@ -417,6 +526,7 @@ const App: React.FC = () => {
 
             <div className="space-y-2 p-4 bg-gray-900/50 rounded-lg mb-6 border border-gray-700">
                 <h3 className="text-lg font-semibold text-gray-200 mb-2">Current Configuration</h3>
+                {analyzedBpm && <p className="text-gray-300 py-1"> <span className="font-semibold text-gray-400 w-28 inline-block capitalize">Analyzed:</span> {analyzedBpm} BPM, {analyzedKey}</p>}
                 {renderConfigRow('genre', selectedSubgenre, 'genre')}
                 {renderConfigRow('influence', selectedInfluenceGenre, 'influence')}
                 {renderConfigRow('instruments', selectedInstruments, 'instruments')}
@@ -519,10 +629,25 @@ const App: React.FC = () => {
             {!promptMode ? (
                 <div>
                      <h2 className="text-2xl font-bold text-gray-100 mb-4 text-center">What are you creating today?</h2>
-                     <ModeToggle selectedMode={promptMode} onSelectMode={setPromptMode} />
+                     <ModeToggle selectedMode={promptMode} onSelectMode={handleSetPromptMode} />
                 </div>
             ) : promptMode === 'Magic Wand' ? (
-                <MagicWandMode onEnhance={handleEnhancePrompt} isLoading={isLoading} onBack={() => setPromptMode(null)} />
+                <MagicWandMode onEnhance={handleEnhancePrompt} isLoading={isLoading} onBack={() => handleSetPromptMode(null)} />
+            ) : promptMode === 'Analyze Track' ? (
+                <AnalyzeTrackMode 
+                  onAnalyze={handleAnalyzeTrack}
+                  isLoading={isAnalyzing}
+                  onBack={() => handleSetPromptMode(null)}
+                  result={analysisResult}
+                  onUseAnalysis={handleUseAnalysis}
+                />
+            ) : promptMode === 'Video Treatment' ? (
+                <MusicVideoMode
+                    onGenerate={handleGenerateVideoTreatment}
+                    isLoading={isGeneratingTreatment}
+                    onBack={() => handleSetPromptMode(null)}
+                    treatment={videoTreatment}
+                />
             ) : (
                 renderArchitectUI()
             )}
@@ -557,6 +682,7 @@ const App: React.FC = () => {
                                 {item.vocalStyle && <span className="px-2 py-1 bg-green-800 text-green-200 rounded">{item.vocalStyle}</span>}
                                 {item.atmosphere && <span className="px-2 py-1 bg-teal-800 text-teal-200 rounded">{item.atmosphere}</span>}
                                 {item.solfeggio && <span className="px-2 py-1 bg-purple-800 text-purple-200 rounded">Solfeggio</span>}
+                                {item.bpm && item.key && <span className="px-2 py-1 bg-pink-800 text-pink-200 rounded">{item.bpm} BPM, {item.key}</span>}
                             </div>
                             <div className="mt-3 flex gap-2">
                                 <button onClick={() => navigator.clipboard.writeText(item.prompt)} className="px-3 py-1 text-xs font-medium text-gray-300 bg-gray-700 rounded-md hover:bg-gray-600 transition-colors">Copy</button>
